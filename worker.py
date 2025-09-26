@@ -131,7 +131,6 @@ def classify_images_from_urls_task(urls: list[str]):
     """
     The main background task. It uses a thread pool to process a list of URLs concurrently.
     """
-    time.sleep(10)
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         results = list(executor.map(download_and_classify_url, urls))
     return results
