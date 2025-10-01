@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
 
 # For the immediate response after starting a job
@@ -13,3 +13,13 @@ class JobResultResponse(BaseModel):
     
 class URLPayload(BaseModel):
     urls: List[str]
+    
+    
+class ImageUrlPayload(BaseModel):
+    image_url: HttpUrl
+    
+class URLClassificationResult(BaseModel):
+    url: str
+    status: str
+    predicted_class: str
+    confidence_level: str

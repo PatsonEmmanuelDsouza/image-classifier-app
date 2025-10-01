@@ -24,4 +24,4 @@ COPY . .
 EXPOSE 8000
 
 # The default command will start the API. The worker's command will be overridden in docker-compose.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
