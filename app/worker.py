@@ -2,36 +2,56 @@
 This script starts a celery worker, it allows to run tasks asynchronously and allows to free up the main thred.
 The program uses redis to implement a job queue along with storing the necessary results
 """
-
+from fastapi import HTTPException
 from celery import Celery
+
 import tensorflow as tf
 from tensorflow import keras
 import numpy as np
-from PIL import Image
-import io
-import requests
+
+import threading
 import concurrent.futures
+
+import io
 import os
 from datetime import datetime
+from PIL import Image
+
+import requests
+
 import uuid
 
+from .database import SessionLocal, ImageRecord
 from .baseModels import URLClassificationResult
-# ----- Constants -----
+
+
+# ----- Load Environment Variables -----
+from dotenv import load_dotenv
+load_dotenv()
+
+# ----- Constants ----
 IMG_WIDTH = 224
 IMG_HEIGHT = 224
 CLASS_NAMES = ['environment','studio']
-MODEL_PATH = "mobilenet_v3_small_model"
-MAX_WORKERS = 5
 
-REDIS_BROKER = "redis://redis:6379/0"
-REDIS_BACKEND = "redis://redis:6379/1"
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = os.getenv("REDIS_PORT")
+CELERY_BROKER_DB = os.getenv("CELERY_BROKER_DB")
+CELERY_BACKEND_DB = os.getenv("CELERY_BACKEND_DB")
+MODEL_PATH = os.getenv("MODEL_PATH")
+
+MAX_WORKERS = int(os.getenv("MAX_WORKERS")) 
+
+REDIS_BROKER = f"redis://{REDIS_HOST}:{REDIS_PORT}/{CELERY_BROKER_DB}"
+REDIS_BACKEND = f"redis://{REDIS_HOST}:{REDIS_PORT}/{CELERY_BACKEND_DB}"
 
 
 # ----- starting Celery task queue -----
 celery_app = Celery(
     "image_classifier_worker",
     broker=REDIS_BROKER,
-    backend=REDIS_BACKEND
+    backend=REDIS_BACKEND,
+    result_expires = 900
 )
 
 
@@ -46,6 +66,20 @@ def disable_GPU():
     except Exception as e:
         print(f"TensorFlow: Could not disable GPUs/MPS. It might still use them if available. Error: {e}")
         
+def process_image(image_bytes: bytes) -> np.ndarray:
+    """
+    Reads image bytes, resizes, and prepares it for the model.
+    """
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        image = image.convert("RGB") 
+        image = image.resize((IMG_WIDTH, IMG_HEIGHT))
+        image_array = np.array(image)
+        image_batch = np.expand_dims(image_array, axis=0)
+        return image_batch
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image file: {e}")
+        
 def process_image_bytes(image_bytes: bytes) -> np.ndarray:
     """Reads image bytes, resizes, and prepares it for the model."""
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -53,37 +87,60 @@ def process_image_bytes(image_bytes: bytes) -> np.ndarray:
     image_array = np.array(image)
     return np.expand_dims(image_array, axis=0)
 
-def download_and_classify_url(url: str, save=False) -> URLClassificationResult:
+
+def download_and_classify_url(url: str, save=True) -> URLClassificationResult:
     """
     This is the core function that will be run by each thread.
     It handles the entire process for a single URL.
     """
+    # Create a database session that will be closed properly
+    db = SessionLocal()
     try:
-        # Download the image from the URL in memory
+        # --- 1. DB CHECK ---
+        existing_record = db.query(ImageRecord).filter(ImageRecord.url == url).first()
+
+        if existing_record and existing_record.status == "success":
+            print(f"CACHE HIT: Found existing successful record for {url}")
+            return URLClassificationResult(
+                url=existing_record.url,
+                status=existing_record.status,
+                predicted_class=existing_record.predicted_class,
+                confidence_level=str(existing_record.confidence_level)
+            )
+        
+        if not existing_record:
+            print(f"WARNING: No pre-existing record found for {url}. Creating one now.")
+            existing_record = ImageRecord(url=url, status="processing")
+            db.add(existing_record)
+            db.commit()
+            db.refresh(existing_record)
+
+        # --- 2. DOWNLOAD & VALIDATE ---
         response = requests.get(url, timeout=15)
         response.raise_for_status()
         
-        content_type = response.headers.get('Content-Type')
-        if not (content_type and content_type.startswith('image/')):
-            raise TypeError
+        content_type = response.headers.get('Content-Type', '')
+        if not content_type.startswith('image/'):
+            error_status = "error - url is not an image"
+            existing_record.status = error_status
+            existing_record.predicted_class="unknown"
+            db.commit()
+            return URLClassificationResult(url=url, status=error_status, predicted_class="unknown", confidence_level="0")
                         
+        # --- 3. PREDICT ---
         current_model = get_model()
-    
+        
+        # model is not available
         if not current_model:
-            # This check is important in case the model failed to load
-            return {"url": url, "status": "error", "detail": "Model is not available."}
+            error_status = "error - model not available"
+            existing_record.status = error_status
+            db.commit()
+            return URLClassificationResult(url=url, status=error_status, predicted_class="unknown", confidence_level="0")
          
-        # Process the image bytes for the model
         image_batch = process_image_bytes(response.content)
-        
-        # Get the model's prediction
-        # Note: model.predict is thread-safe in TensorFlow
         prediction = current_model.predict(image_batch)
-        
-        # Process the prediction to get class and confidence
         score = float(prediction[0][0])
         
-        # since it is a binary model, we have two classes, where sigmoid function will return a value [0,1]
         if score >= 0.5:
             # studio
             class_name = CLASS_NAMES[1]
@@ -95,62 +152,94 @@ def download_and_classify_url(url: str, save=False) -> URLClassificationResult:
         
         # when the save flag is true, we save the image locally
         if save:
-            save_directory = "lookedup_images"
-            os.makedirs(save_directory, exist_ok=True)
+            current_day_dir = datetime.now().strftime("%Y%m%d")
+
+            main_save_dir = os.getenv("IMAGE_DIRECTORY")
+            save_directory = f"{main_save_dir}/{current_day_dir}"
             
+            os.makedirs(save_directory, exist_ok=True)
+
             # extension
             file_extension = content_type.split('/')[-1]
-            # current time
-            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            unique_filename = f"{current_time}_{class_name}_{round(confidence*100)}.{file_extension}"
+            
+            unique_filename = f"{uuid.uuid4()}_{class_name}_{round(confidence*100)}.{file_extension}"
             
             save_path = os.path.join(save_directory, unique_filename)
-            
+                        
             # writing the file
             with open(save_path, 'wb') as f:
                 f.write(response.content)
-            print(f"IMAGE LOOKUP:    {url} saved to {save_path}")
+            
+            existing_record.filename = unique_filename
+            existing_record.folder_location = current_day_dir
+            
+            print(f"IMAGE LOOKUP: {url} saved to {save_path}")
         
-        # Return a successful result dictionary
-        return {
-            "url": url,
-            "status": "success",
-            "predicted_class": class_name,
-            "confidence_level": f"{confidence:.2%}"
-        }
-    except TypeError:
-        return {"url": url, "status": "error", "detail": "Provided URL is not an image!"}
+        existing_record.status = "success"
+        existing_record.predicted_class = class_name
+        existing_record.confidence_level = confidence
+        
+        db.commit()
+        
+        return URLClassificationResult(
+            url=url,
+            status="success",
+            predicted_class=class_name,
+            confidence_level=f"{confidence:.2f}" # Use .2f for float formatting
+        )
+    
     except Exception as e:
-        # If anything goes wrong, return an error dictionary
-        return {"url": url, "status": "error", "detail": str(e)}
+        error_status = f"error - {e.__class__.__name__}"
+        print(f"ERROR processing {url}: {e}")
+        
+        # Update the record in the DB with the specific error
+        if 'existing_record' in locals() and existing_record:
+            existing_record.status = error_status
+            db.commit()
+            
+        return URLClassificationResult(url=url, status=error_status, predicted_class="unknown", confidence_level="0")
+
+    finally:
+        db.close()
     
 
 
 # ----- loading model -----
 disable_GPU()
 model = None
-
+model_lock = threading.Lock()
 
 def get_model():
     """
     Loads the Keras model into the global 'model' variable if it hasn't been loaded yet.
-    This is called "lazy loading".
+    This version is thread-safe using a lock.
     """
     global model
+    # No need to acquire the lock just to check, this is a quick check.
     if model is None:
-        print("MODEL INFO:  Model not loaded yet. Loading now...")
-        if not os.path.exists(MODEL_PATH):
-            print(f"FATAL:  Model folder not found at {MODEL_PATH}")
-            return None
-        try:    
-            model = keras.models.load_model(MODEL_PATH)
-            # Perform a dummy prediction to fully initialize the model
-            model.predict(np.zeros((1, IMG_WIDTH, IMG_HEIGHT, 3)))
-            print("MODEL INFO:  Model loaded successfully.")
-        except Exception as e:
-            print(f"FATAL: Could not load model. Error: {e}")
-            # The model will remain None, and tasks will fail gracefully.
+        # 2. Acquire the lock. Only one thread can pass this point at a time.
+        #    Other threads will wait here until the lock is released.
+        with model_lock:
+            # 3. Double-check if the model is still None.
+            #    This is crucial because another thread might have finished loading it
+            #    while the current thread was waiting for the lock.
+            if model is None:
+                print("MODEL INFO:  Model not loaded yet. Loading now...")
+                # ... (your existing model loading logic) ...
+                try:    
+                    model = keras.models.load_model(MODEL_PATH)
+                    # Perform a dummy prediction to fully initialize the model
+                    # This also helps with the TensorFlow retracing warning.
+                    model.predict(np.zeros((1, IMG_WIDTH, IMG_HEIGHT, 3)))
+                    print("MODEL INFO:  Model loaded successfully.")
+                except Exception as e:
+                    print(f"FATAL: Could not load model. Error: {e}")
+            else:
+                print("MODEL INFO:  Reusing model loaded by another thread.")
+    else:
+        print("MODEL INFO:  Reusing already loaded model.")
     return model
+
     
     
     
@@ -162,5 +251,8 @@ def classify_images_from_urls_task(urls: list[str]):
     """
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         results = list(executor.map(download_and_classify_url, urls))
-    return results
+        
+    serializable_results = [result.model_dump() for result in results]
+    
+    return serializable_results
     
