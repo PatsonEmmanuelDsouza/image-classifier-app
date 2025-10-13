@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{title}}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+
+     <!-- custom style for the query box that shows the current query -->
+    <style>
+        #query-box {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            max-width: 350px;
+            word-wrap: break-word;
+        }
+        .comment {
+            color: gray;
+            text-decoration: line-through;
+            font-style: italic;
+        }
+    </style>
+
+</head>
+</head>
+<body class="d-flex flex-column min-vh-100">
+    <div class="flex-grow-1">
+        <nav class="navbar navbar-expand-lg bg-body-tertiary">
+            <div class="container-fluid">
+              <a class="navbar-brand">Furniture-image-classifier-app</a>
+              <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+              </button>
+              <div class="collapse navbar-collapse" id="navbarSupportedContent">
+                <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                    <li class="nav-item">
+                        <a class="nav-link active" aria-current="page" href="{{url_for('index')}}">Home</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link active" aria-current="page" href="{{url_for('classify')}}">Classify Image</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link active" aria-current="page" href="{{url_for('view_job')}}">View Job</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link active" aria-current="page" href="{{url_for('review_images')}}">Review Images</a>
+                    </li>
+
+                </ul>
+
+              </div>
+            </div>
+          </nav>
+
+        {% for mess in get_flashed_messages() %}
+            <div class="container alert alert-warning alert-dismissible fade show" role="alert">
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                {{mess}}
+            </div>
+        {% endfor %}
+
+        <div class="container">
+            {% block content %}
+            {% endblock %}
+        </div>
+        
+    </div>
+
+    <footer class="bg-dark text-light text-center py-3 mt-auto">
+        <p>
+            This project was developed to demonstrate Furniture Image Classifier App.
+        </p>
+    </footer>
+</body>
+
+</html>

@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container mt-5">
+    <div class="text-center mb-4">
+        <h2>{{ title }}</h2>
+        <p class="text-muted">Review the image classifications and take action.</p>
+    </div>
+
+    {% if error %}
+    <div class="alert alert-danger text-center" role="alert">
+        <strong>Error:</strong> {{ error }}
+    </div>
+    {% endif %}
+
+    {% if images %}
+    <div id="image-grid" class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
+        {% for image in images %}
+        <div class="col">
+            <div class="card h-100 shadow-sm review-card">
+                <img src="{{ image.url }}" class="card-img-top" alt="Image to review" style="height: 200px; object-fit: cover;">
+                <div class="card-body">
+                    <h5 class="card-title">Prediction: <span class="text-primary">{{ image.predicted_class | replace("_", " ") | title }}</span></h5>
+                    <p class="card-text mb-2">Confidence: <strong>{{ image.confidence_level }}%</strong></p>
+                    <p class="card-text"><small class="text-muted">Status: {{ image.status }}</small></p>
+                </div>
+                <div class="card-footer bg-white border-top-0 d-flex justify-content-between">
+                    <button class="btn btn-success btn-sm review-action-btn" 
+                            data-action="review" 
+                            data-url="{{ image.url }}">
+                        Mark as Reviewed
+                    </button>
+                    <button class="btn btn-warning btn-sm review-action-btn" 
+                            data-action="relabel" 
+                            data-url="{{ image.url }}">
+                        Relabel
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% elif not error %}
+        <div class="alert alert-info text-center" role="alert">
+            There are no images to review at this time.
+        </div>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const actionButtons = document.querySelectorAll('.review-action-btn');
+
+    actionButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const action = this.dataset.action;
+            const imageUrl = this.dataset.url;
+            const cardElement = this.closest('.review-card');
+
+            let targetApiUrl;
+            
+            if (action === 'review') {
+                targetApiUrl = '{{ backend_set_reviewed_url }}';
+            } else if (action === 'relabel') {
+                targetApiUrl = '{{ backend_relabel_url }}';
+            } else {
+                return;
+            }
+
+            cardElement.querySelectorAll('button').forEach(btn => btn.disabled = true);
+
+            fetch(targetApiUrl, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ image_url: imageUrl }),
+            })
+            // *** START OF CHANGES ***
+            .then(response => {
+                // First, check for any real errors (4xx, 5xx)
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                
+                // If the status is 204, we're done! Return a signal of success.
+                if (response.status === 204) {
+                    return null; // or return Promise.resolve();
+                }
+
+                // Otherwise, for other success codes (like 200), parse the JSON
+                return response.json();
+            })
+            .then(data => {
+                // This block now only runs for 200 OK responses with data, or receives 'null' for 204s.
+                // In both cases, the action was successful.
+                console.log('Success:', data || 'No content received (204)');
+                
+                // Hide the card as the action was successful
+                cardElement.style.transition = 'opacity 0.5s ease';
+                cardElement.style.opacity = '0';
+                setTimeout(() => {
+                    // Using .parentElement.remove() is better for grid reflow
+                    cardElement.parentElement.remove();
+                }, 500);
+            })
+            // *** END OF CHANGES ***
+            .catch(error => {
+                console.error('Error:', error);
+                alert(`An error occurred while trying to ${action} the image.`);
+                cardElement.querySelectorAll('button').forEach(btn => btn.disabled = false);
+            });
+        });
+    });
+});
+</script>
+
+{% endblock %}

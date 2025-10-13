@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Body, status, Request, Depends, BackgroundTasks
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from celery.result import AsyncResult
@@ -41,6 +42,16 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:5000"],  # The origin of your Flask frontend
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows PATCH, POST, GET, etc.
+    allow_headers=["*"],
+)
+
 
 # ----- env items ------
 IMAGE_DIRECTORY = os.getenv("IMAGE_DIRECTORY")
@@ -134,34 +145,50 @@ async def classify_image_urls(payload: URLPayload, db: Session = Depends(get_db)
     # Convert each HttpUrl object in the list to a plain string
     urls_as_strings = [str(url) for url in payload.urls]
     # Now, pass the list of strings to the Celery task
+    
+    records_to_update = []
+
+    try:
+        for url_str in urls_as_strings:
+            existing_record = db.query(ImageRecord).filter(ImageRecord.url == url_str).first()
+            
+            if existing_record:
+                continue
+            else:
+                # If it's a new URL, create a placeholder record
+                new_record = ImageRecord(
+                    url=url_str,
+                )
+                db.add(new_record)
+                records_to_update.append(new_record)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logging.error(f"DB Error during Phase 1 (record creation): {e}")
+        raise HTTPException(status_code=500, detail="Failed to prepare database records for the job.")
+
     task = classify_images_from_urls_task.delay(urls_as_strings)
     
     logging.info(f"post/classify-image-urls/ was accessed! {len(urls_as_strings)} task(s) with job_id: {task.id}")
     
     # --- Database Population Logic ---
     try:
-        for url_str in urls_as_strings:
-            
-            # checking if the URL already exists on the DB
-            existing_record = db.query(ImageRecord).filter(ImageRecord.url == url_str).first()
-            if existing_record:
-                logging.info(f"URL already in database, skipping: {url_str}")
-                continue
-            
-            # Create a new record for each URL
-            db_record = ImageRecord(
-                url=url_str,
-                job_id=task.id,
-                status="queued" # Set an initial status
-            )
-            db.add(db_record)
-
-        # Commit all the new records to the database in one transaction
+        for record in records_to_update:
+            # Refresh the record in case the session state is stale
+            db.refresh(record)
+            record.job_id = task.id
+        
+        # Commit the final update with the job ID
         db.commit()
-    
+        logging.info(f"Successfully updated {len(records_to_update)} records with job_id: {task.id}")
+
     except Exception as e:
         db.rollback()
-        logging.error(f"Failed to save job records to DB: {e}")
+        # This is also a critical failure, as the job is running but the DB doesn't reflect it.
+        logging.error(f"DB Error during Phase 2 (job_id update): {e}. Job {task.id} is running without linked DB records.")
+        # You might need a mechanism to reconcile this later.
+        raise HTTPException(status_code=500, detail="Failed to associate job ID with database records.")
+        
         
     return {"job_id": task.id}
 

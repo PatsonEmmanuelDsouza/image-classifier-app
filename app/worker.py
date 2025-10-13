@@ -177,7 +177,7 @@ def download_and_classify_url(url: str, save=True) -> URLClassificationResult:
         
         existing_record.status = "success"
         existing_record.predicted_class = class_name
-        existing_record.confidence_level = confidence
+        existing_record.confidence_level = round(confidence*100,2)
         
         db.commit()
         
@@ -185,7 +185,7 @@ def download_and_classify_url(url: str, save=True) -> URLClassificationResult:
             url=url,
             status="success",
             predicted_class=class_name,
-            confidence_level=f"{confidence:.2f}" # Use .2f for float formatting
+            confidence_level=f"{(confidence*100):.2f}" # Use .2f for float formatting
         )
     
     except Exception as e:

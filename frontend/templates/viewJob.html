@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-8 col-lg-6">
+            <div class="card shadow-sm">
+                <div class="card-body">
+                    <h2 class="card-title text-center mb-4">View Job Results</h2>
+                    
+                    <form action="{{ url_for('view_job') }}" method="POST">
+                        <div class="mb-3">
+                            <label for="job_id" class="form-label">Job ID</label>
+                            <input type="text" class="form-control" id="job_id" name="job_id" placeholder="Enter the Job ID from the batch classification" value="{{ job_id or '' }}" required>
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-primary">Fetch Job Results</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row justify-content-center mt-5">
+        <div class="col-md-12">
+
+            {% if error %}
+            <div class="alert alert-danger text-center" role="alert">
+                <strong>Error:</strong> {{ error }}
+            </div>
+            {% endif %}
+
+            {% if job_id and not error %}
+            <div class="text-center mb-4">
+                <h2>Results for Job ID: <span class="text-muted">{{ job_id }}</span></h2>
+                <h4>Status: 
+                    <span class="
+                        {% if job_status == 'COMPLETED' %} badge bg-success
+                        {% elif job_status == 'PENDING' %} badge bg-warning
+                        {% else %} badge bg-secondary {% endif %}">
+                        {{ job_status or 'UNKNOWN' }}
+                    </span>
+                </h4>
+            </div>
+
+            {% if job_status == 'PENDING' %}
+            <div class="alert alert-info text-center" role="alert">
+                This job is still being processed. Please check back in a few moments.
+            </div>
+            {% endif %}
+
+            {% if results %}
+            <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
+                {% for result in results %}
+                <div class="col">
+                    <div class="card h-100 shadow-sm">
+                        <img src="{{ result.url }}" class="card-img-top" alt="Classified Image" style="height: 200px; object-fit: cover;">
+                        <div class="card-body">
+                            <h5 class="card-title">Prediction: <span class="text-primary">{{ result.predicted_class }}</span></h5>
+                            <p class="card-text">Confidence: <strong>{{ result.confidence_level }}%</strong></p>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% elif job_status == 'COMPLETED' %}
+                <div class="alert alert-secondary text-center" role="alert">
+                    This job completed successfully but produced no results.
+                </div>
+            {% endif %}
+            
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

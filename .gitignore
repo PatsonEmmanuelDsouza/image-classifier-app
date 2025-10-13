@@ -10,3 +10,5 @@ scraper/
 lookedup_images/
 all-images/
 *node_modules/
+*logs/
+*.db

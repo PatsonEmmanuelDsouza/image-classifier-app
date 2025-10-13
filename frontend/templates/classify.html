@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container mt-5">
+    <!-- Row for the input forms -->
+    <div class="row g-5 justify-content-center">
+
+        <!-- Column 1: Single Image Classification -->
+        <div class="col-md-6">
+            <div class="card shadow-sm h-100">
+                <div class="card-body">
+                    <h2 class="card-title text-center mb-4">Classify a Single Image</h2>
+                    
+                    <form action="{{ url_for('classify') }}" method="POST">
+                        <div class="mb-3">
+                            <label for="image_url" class="form-label">Image URL</label>
+                            <input type="url" class="form-control" id="image_url" name="image_url" placeholder="https://example.com/image.jpg" required>
+                        </div>
+                        <div class="d-grid">
+                            <!-- This button's name/value tells Flask which form was submitted -->
+                            <button type="submit" name="action" value="single" class="btn btn-primary">Classify Image</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- Column 2: Multiple Image Classification -->
+        <div class="col-md-6">
+            <div class="card shadow-sm h-100">
+                <div class="card-body">
+                    <h2 class="card-title text-center mb-4">Classify Multiple Images</h2>
+                    
+                    <form action="{{ url_for('classify') }}" method="POST">
+                        <div class="mb-3">
+                            <label for="image_urls" class="form-label">Image URLs (one per line)</label>
+                            <textarea class="form-control" id="image_urls" name="image_urls" rows="5" placeholder="https://example.com/image1.jpg&#10;https://example.com/image2.png" required></textarea>
+                        </div>
+                        <div class="d-grid">
+                             <!-- This button's name/value tells Flask which form was submitted -->
+                            <button type="submit" name="action" value="batch" class="btn btn-secondary">Classify All Images</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Centered section for all errors and results -->
+    <div class="row justify-content-center mt-5">
+        <div class="col-md-10 col-lg-8">
+
+            <!-- Display single image error -->
+            {% if single_error %}
+            <div class="alert alert-danger" role="alert">
+                <strong>Error:</strong> {{ single_error }}
+            </div>
+            {% endif %}
+
+            <!-- Display batch classification error -->
+            {% if batch_error %}
+            <div class="alert alert-danger" role="alert">
+                <strong>Error:</strong> {{ batch_error }}
+            </div>
+            {% endif %}
+
+            <!-- Display single image result -->
+            {% if prediction and image_url %}
+            <div class="card shadow-sm">
+                <div class="card-header text-center fs-5">Result</div>
+                <div class="card-body text-center">
+                    <img src="{{ image_url }}" class="img-fluid rounded mb-3" alt="Classified Image" style="max-height: 300px;">
+                    <h3 class="card-title">Prediction: <span class="text-primary">{{ prediction }}</span></h3>
+                    <h3 class="card-title">Confidence: <span class="text-primary">{{ confidence_level }}%</span></h3>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Display batch classification results -->
+            {% if job_id %}
+            <div class="card shadow-sm">
+                <div class="card-header text-center fs-5">Job ID</div>
+                <div class="card-body text-center">
+                    <h3 class="card-title">Job ID: <span class="text-primary">{{ job_id }}</span></h3>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
+
