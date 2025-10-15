@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, flash 
+from flask import Flask, render_template, request, flash, session, redirect, url_for
 import requests
 
 app = Flask(__name__)
@@ -12,7 +12,8 @@ BACKEND_RELABEL_URL = "http://localhost:8000/relabel-image/"
 
 BACKEND_SINGLE_IMAGE_CLASSIFIER_URL = "http://localhost:8000/classify-image-url/"
 BACKEND_MULTI_IMAGE_CLASSIFIER_URL = "http://localhost:8000/classify-image-urls/"
-BACKEND_VIEW_JOB_URL = "http://localhost:8000/get_job/"
+BACKEND_FILE_CLASSIFIER_URL = "http://localhost:8000/classify-image-file/"
+BACKEND_VIEW_JOB_URL = "http://localhost:8000/job/"
 
 
 # CSRF security
@@ -29,6 +30,16 @@ def classify():
     title = "Classify Image(s)"
 
     if request.method == 'POST':
+        
+        # check if API key is entered 
+        headers = {}
+        api_key = session.get('api_key')
+        if api_key:
+            headers['X-API-Key'] = api_key
+        else:
+            flash("API Key is not set. Please enter your key in the navbar.", "danger")
+            return render_template("classify.html", title=title)
+        
         # Check which form was submitted by looking at the submit button's 'name' attribute
         action = request.form.get('action')
         
@@ -41,7 +52,7 @@ def classify():
             
             try:
                 payload = {'image_url': image_url}
-                response = requests.post(BACKEND_SINGLE_IMAGE_CLASSIFIER_URL, json=payload)
+                response = requests.post(BACKEND_SINGLE_IMAGE_CLASSIFIER_URL, json=payload, headers=headers)
                 response.raise_for_status()
                 result = response.json()
                 prediction = result.get('predicted_class', 'No prediction found.')
@@ -78,7 +89,7 @@ def classify():
 
             try:
                 payload = {'urls': url_list}
-                response = requests.post(BACKEND_MULTI_IMAGE_CLASSIFIER_URL, json=payload)
+                response = requests.post(BACKEND_MULTI_IMAGE_CLASSIFIER_URL, json=payload, headers=headers)
                 response.raise_for_status()
                 job_id = response.json().get('job_id', "None")
                 flash(f"Submitted multiple image URL for classification! view job with job id: {job_id}")
@@ -94,6 +105,35 @@ def classify():
             except Exception as e:
                 return render_template("classify.html", title=title, batch_error=f"An error occurred: {e}")
 
+        elif action == 'file':
+            if 'image_file' not in request.files:
+                return render_template("classify.html", title=title, file_error="No file part in the request.")
+            
+            file = request.files['image_file']
+
+            if file.filename == '':
+                return render_template("classify.html", title=title, file_error="No file selected for uploading.")
+
+            if file:
+                try:
+                    # The key 'file' must match the parameter name in your FastAPI endpoint.
+                    files = {'file': (file.filename, file.stream, file.mimetype)}
+                    response = requests.post(BACKEND_FILE_CLASSIFIER_URL, files=files, headers=headers)
+                    response.raise_for_status()
+                    
+                    result = response.json()
+                    
+                    return render_template(
+                        "classify.html",
+                        title="File Classification Result",
+                        file_result=result # Pass the whole result dictionary to the template
+                    )
+                except requests.exceptions.RequestException as e:
+                    error = f"Could not connect to the backend. (Error: {e})"
+                    return render_template("classify.html", title=title, file_error=error)
+                except Exception as e:
+                    return render_template("classify.html", title=title, file_error=f"An error occurred: {e}")
+        
     # For a GET request, just show the initial page
     return render_template("classify.html", title=title)
 
@@ -160,7 +200,15 @@ def view_job():
 def review_images():
     title = "Review Images"
     try:
-        response = requests.get(BACKEND_GET_REVIEW_IMAGES_URL)
+        headers = {}
+        api_key = session.get('api_key')
+        if api_key:
+            headers['X-API-Key'] = api_key
+        else:
+            flash("API Key is not set. Or you need to be an Admin! Please enter your key in the navbar.", "danger")
+            return render_template("reviewImages.html", title=title)
+        
+        response = requests.get(BACKEND_GET_REVIEW_IMAGES_URL, headers=headers)
         response.raise_for_status()
         images_data = response.json()
 
@@ -184,7 +232,8 @@ def review_images():
             title=title, 
             images=images_data,
             backend_set_reviewed_url=BACKEND_SET_REVIEWED_URL,
-            backend_relabel_url=BACKEND_RELABEL_URL
+            backend_relabel_url=BACKEND_RELABEL_URL,
+            api_key = session.get('api_key')
         )
 
     except requests.exceptions.RequestException as e:
@@ -193,6 +242,24 @@ def review_images():
     except Exception as e:
         error = f"An unexpected error occurred: {e}"
         return render_template("reviewImages.html", title=title, error=error)
+
+
+@app.route('/set-api-key', methods=['POST'])
+def set_api_key():
+    """Saves the API key from the navbar form into the user's session."""
+    api_key = request.form.get('api_key')
+    if api_key:
+        session['api_key'] = api_key
+        flash('API Key saved successfully!', 'success')
+    else:
+        # If the user submits an empty form, clear the key
+        if 'api_key' in session:
+            del session['api_key']
+        flash('API Key cleared.', 'info')
+    
+    # Redirect the user back to the page they were on
+    return redirect(request.referrer or url_for('index'))
+
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)

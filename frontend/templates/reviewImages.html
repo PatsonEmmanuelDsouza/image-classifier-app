@@ -57,6 +57,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const imageUrl = this.dataset.url;
             const cardElement = this.closest('.review-card');
 
+            const apiKey = '{{ api_key | safe }}';
+
             let targetApiUrl;
             
             if (action === 'review') {
@@ -73,41 +75,35 @@ document.addEventListener('DOMContentLoaded', () => {
                 method: 'PATCH',
                 headers: {
                     'Content-Type': 'application/json',
+                    'X-API-Key': apiKey
                 },
                 body: JSON.stringify({ image_url: imageUrl }),
             })
-            // *** START OF CHANGES ***
             .then(response => {
-                // First, check for any real errors (4xx, 5xx)
-                if (!response.ok) {
-                    throw new Error(`HTTP error! Status: ${response.status}`);
+                  if (!response.ok) {
+                    // Check for specific API key error codes
+                    if (response.status === 401 || response.status === 403) {
+                        // Throw a specific error for auth issues
+                        throw new Error('Invalid API Key. You need to use an admin API key to review images! Please re-enter a valid admin key in the navbar and try again.');
+                    }
+                    // For other errors, try to read the error message from the backend
+                    return response.json().then(err => { 
+                        throw new Error(err.detail || `HTTP error! Status: ${response.status}`);
+                    });
                 }
-                
-                // If the status is 204, we're done! Return a signal of success.
-                if (response.status === 204) {
-                    return null; // or return Promise.resolve();
-                }
-
-                // Otherwise, for other success codes (like 200), parse the JSON
-                return response.json();
+                return response.status === 204 ? null : response.json();
             })
             .then(data => {
-                // This block now only runs for 200 OK responses with data, or receives 'null' for 204s.
-                // In both cases, the action was successful.
                 console.log('Success:', data || 'No content received (204)');
-                
-                // Hide the card as the action was successful
                 cardElement.style.transition = 'opacity 0.5s ease';
                 cardElement.style.opacity = '0';
                 setTimeout(() => {
-                    // Using .parentElement.remove() is better for grid reflow
                     cardElement.parentElement.remove();
                 }, 500);
             })
-            // *** END OF CHANGES ***
             .catch(error => {
                 console.error('Error:', error);
-                alert(`An error occurred while trying to ${action} the image.`);
+                alert(`An error occurred while trying to ${action} the image \n${error}`);
                 cardElement.querySelectorAll('button').forEach(btn => btn.disabled = false);
             });
         });

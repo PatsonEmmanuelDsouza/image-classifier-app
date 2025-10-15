@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, Body, status, Request, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Body, status, Request, Depends, BackgroundTasks, Security, UploadFile, File
+from fastapi.security import APIKeyHeader
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -8,14 +9,15 @@ from celery.result import AsyncResult
 
 from typing import List
 from sqlalchemy.orm import Session
-from .baseModels import URLPayload, JobResponse, JobResultResponse, ImageUrlPayload, URLClassificationResult
-from .worker import classify_images_from_urls_task, download_and_classify_url, get_model
+from .baseModels import URLPayload, JobResponse, JobResultResponse, ImageUrlPayload, URLClassificationResult, FileClassificationResult
+from .worker import classify_images_from_urls_task, download_and_classify_url, get_model, download_and_classify_image_file
 from .database import init_db, get_db, ImageRecord
 
 from datetime import datetime
 
 import os
 import shutil
+import json
 
 import logging
 
@@ -23,16 +25,64 @@ import logging
 from dotenv import load_dotenv
 load_dotenv()
 
+# ----- dir env items ------
+# the dir that would store looked up images
+IMAGE_DIRECTORY = os.getenv("IMAGE_DIRECTORY")
+os.makedirs(IMAGE_DIRECTORY, exist_ok=True)
+
+# dir for images that were labelled as environment but need to be trained to be marked as studio
+RETRAIN_STUDIO_DIR = os.getenv("RETRAIN_STUDIO_DIR")
+os.makedirs(RETRAIN_STUDIO_DIR, exist_ok=True)
+
+# dir in case of error
+ERROR_IMAGE_DIR = os.getenv("ERROR_IMAGE_DIR")
+os.makedirs(ERROR_IMAGE_DIR, exist_ok=True)
+
+# dir for images that were labelled as studio but need to be trained to be marked as environment
+RETRAIN_ENVIRONMENT_DIR = os.getenv("RETRAIN_ENVIRONMENT_DIR")
+os.makedirs(RETRAIN_ENVIRONMENT_DIR, exist_ok=True)
+
+# logs dir
+LOG_DIR = os.getenv("LOG_DIR")
+LOG_LEVEL = os.getenv("LOG_LEVEL")
+
+
+# --- Security Configuration ---
+
+# the secure API key needs to be in the header with key "X-API-Key"
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key")
+
+# Load allowed IPs and API keys from environment variables
+ALLOWED_IPS = os.getenv("ALLOWED_IPS", "").split(",")
+API_KEYS = os.getenv("API_KEYS", "").split(",")
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")
+API_KEYS.append(ADMIN_API_TOKEN)
+
+
+api_key_mappings_str = os.getenv("API_KEY_MAPPINGS")
+if not api_key_mappings_str:
+    raise ValueError("API_KEY_MAPPINGS is not set in the .env file")
+try:
+    # Parse the JSON string into a Python dictionary
+    API_KEY_MAPPINGS = json.loads(api_key_mappings_str)
+except json.JSONDecodeError:
+    raise ValueError("API_KEY_MAPPINGS in .env is not valid JSON")
+
+
+MAX_IMAGE_BATCH = int(os.getenv("MAX_IMAGE_BATCH"))
+MODEL_VERSION = os.getenv("MODEL_VERSION")
+
 # ----- App setup -----
+
+# Code to run on startup
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Code to run on startup
     print("--- loading model and DB on startup ---")
     init_db()
     get_model()
-    # The server is now ready to accept requests
     yield
     # Code to run on shutdown (optional)
+    
     print("--- Server shutting down ---")
 
 
@@ -43,34 +93,53 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-
+# allows for Patch, as CORS will block requests from unknown sources
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5000"],  # The origin of your Flask frontend
+    allow_origins=["http://127.0.0.1:5000"],  # current origin of Flask frontend
     allow_credentials=True,
     allow_methods=["*"],  # Allows PATCH, POST, GET, etc.
     allow_headers=["*"],
 )
 
 
-# ----- env items ------
-IMAGE_DIRECTORY = os.getenv("IMAGE_DIRECTORY")
-os.makedirs(IMAGE_DIRECTORY, exist_ok=True)
+# --- Security Dependency Function ---
+# this is a method that allows us to check client IP address and secure API token
 
-RETRAIN_STUDIO_DIR = os.getenv("RETRAIN_STUDIO_DIR")
-os.makedirs(RETRAIN_STUDIO_DIR, exist_ok=True)
+def get_secure_endpoint_dependency(admin_required: bool = False):
+    """
+    Factory that returns a dependency with robust key-to-IP mapping logic.
+    """
+    async def secure_endpoint(request: Request, api_key: str = Security(API_KEY_HEADER)):
+        client_ip = request.client.host
+        
+        if api_key == ADMIN_API_TOKEN:
+            if admin_required:
+                return {"message": "Authenticated as Admin"}
+            return {"message": "Authenticated"}
+        
+        if admin_required:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Requires admin privileges"
+            )
 
-ERROR_IMAGE_DIR = os.getenv("ERROR_IMAGE_DIR")
-os.makedirs(ERROR_IMAGE_DIR, exist_ok=True)
+        if api_key not in API_KEY_MAPPINGS or api_key != ADMIN_API_TOKEN:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: Invalid API Key"
+            )
 
-
-RETRAIN_ENVIRONMENT_DIR = os.getenv("RETRAIN_ENVIRONMENT_DIR")
-os.makedirs(RETRAIN_ENVIRONMENT_DIR, exist_ok=True)
-
-
-LOG_DIR = os.getenv("LOG_DIR")
-LOG_LEVEL = os.getenv("LOG_LEVEL")
-
+        allowed_ips_for_key = API_KEY_MAPPINGS[api_key]
+        if client_ip not in allowed_ips_for_key or api_key!=ADMIN_API_TOKEN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Forbidden: IP address {client_ip} is not allowed for this API key"
+            )
+        
+        return {"message": "Authenticated"}
+    
+    return secure_endpoint
 
 # --- Set up Logging ---
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -111,7 +180,6 @@ def copy_image_for_retraining(file_path: str, destination_dir: str, file_name: s
 # --- API Endpoints ---
 @app.get('/', tags=["Default Endpoint"])
 def home():
-    # you can use this to check if the backend is up or not
     return {'message': "welcome to this tool!"}
 
 
@@ -121,7 +189,7 @@ def home():
           response_model=JobResponse, 
           status_code=status.HTTP_202_ACCEPTED, 
           tags=["Classification"])
-async def classify_image_urls(payload: URLPayload, db: Session = Depends(get_db)):
+async def classify_image_urls(payload: URLPayload, db: Session = Depends(get_db), auth: dict = Depends(get_secure_endpoint_dependency())):
     """
         Starts a background job to classify images from a list of URLs.
 
@@ -146,6 +214,12 @@ async def classify_image_urls(payload: URLPayload, db: Session = Depends(get_db)
     urls_as_strings = [str(url) for url in payload.urls]
     # Now, pass the list of strings to the Celery task
     
+    if len(urls_as_strings)>MAX_IMAGE_BATCH:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Too many files uploaded. A maximum of {MAX_IMAGE_BATCH} images is allowed per job."
+        )
+    
     records_to_update = []
 
     try:
@@ -159,6 +233,8 @@ async def classify_image_urls(payload: URLPayload, db: Session = Depends(get_db)
                 new_record = ImageRecord(
                     url=url_str,
                 )
+                new_record.prediction_model_version=MODEL_VERSION
+                new_record.image_type='url'
                 db.add(new_record)
                 records_to_update.append(new_record)
         db.commit()
@@ -207,7 +283,7 @@ async def classify_image_urls(payload: URLPayload, db: Session = Depends(get_db)
             }
         )
 async def classify_image_url(
-    payload: ImageUrlPayload, db: Session = Depends(get_db)
+    payload: ImageUrlPayload, db: Session = Depends(get_db), auth: dict = Depends(get_secure_endpoint_dependency())
 ):
     """
         Endpoint that allows to immediately classify the image from an input URL.
@@ -233,8 +309,10 @@ async def classify_image_url(
             # Create a new record for the given URL
             logging.info(f"New image URL is being looked up, creating an entry in DB.")
             db_record = ImageRecord(
-                url=url,
+                url=url
             )
+            db_record.prediction_model_version=MODEL_VERSION
+            db_record.image_type='url'
             db.add(db_record)
             db.commit()
         else: 
@@ -252,7 +330,81 @@ async def classify_image_url(
 
 
 
-@app.get("/get_job/{job_id}", response_model=JobResultResponse, tags=["Jobs"])
+# # classifies a single image using the url provided in the body of the request
+@app.post("/classify-image-file/",
+          summary="Classify a single image file",
+          status_code=status.HTTP_200_OK,
+          response_model=FileClassificationResult, 
+          tags=["Classification"],
+          responses={
+            200: {"description": "Image classified successfully."},
+            400: {"description": "Bad Request: No image_url was provided in the body."},
+            500: {"description": "Database exception: A database error took place."}
+            
+            }
+        )
+async def classify_image_file( request:Request,
+    file: UploadFile = File(...), db: Session = Depends(get_db), auth: dict = Depends(get_secure_endpoint_dependency())
+):
+    """
+        Endpoint that allows to immediately classify the image from an input image file.
+
+        Args:
+            UploadFile: A single image file.
+
+        Returns:
+            FileClassificationResult: A JSON object containing the url, status and class of an image.
+
+        Raises:
+            HTTPException: A 400 Bad Request error if the file is not uploaded.
+    """
+    logging.info(f"post/classify-image-file/ was accessed to classify a single image file.")
+    
+    # Ensure the uploaded file is an image
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload an image.")
+
+    upload_filename = file.filename
+    # save image file
+    
+    image_bytes = await file.read()
+    try:
+        result = download_and_classify_image_file(image_bytes=image_bytes, originalFileName=file.filename)
+    except IOError as e:
+        logging.error(f"File system error: {e}")
+        raise HTTPException(status_code=500, detail="Could not save the image file.")
+    
+    image_local_url = request.url_for('get_image', date_folder=result.current_day_dir, filename=result.local_file_name)
+    
+    try:
+        new_record = ImageRecord()
+        new_record.confidence_level = result.confidence_level
+        new_record.url = str(image_local_url)
+        new_record.folder_location = result.current_day_dir
+        new_record.local_filename = result.local_file_name
+        new_record.upload_file_name = upload_filename
+        new_record.image_type = 'file'
+        new_record.prediction_model_version = MODEL_VERSION
+        new_record.status="success"
+        new_record.predicted_class=result.predicted_class
+        
+        db.add(new_record)
+        db.commit()
+    except Exception as e:
+        logging.error(f"Failed to add entry into db: {e}")
+        db.rollback
+        raise HTTPException(status_code=500, detail="Database issue")
+
+    return FileClassificationResult(
+        fileName=upload_filename,
+        status='success',
+        confidence_level=result.confidence_level,
+        predicted_class=result.predicted_class
+    )
+
+
+
+@app.get("/job/{job_id}", response_model=JobResultResponse, tags=["Jobs"])
 async def get_job_status(job_id: str):
     """
     Retrieves the status and result of a classification job by its ID.
@@ -298,13 +450,17 @@ async def get_image(filename: str, date_folder: str):
          status_code=status.HTTP_200_OK,
          response_model=List[URLClassificationResult],
          tags=["Review Images"])
-async def review_lookedup_images(request: Request, db: Session = Depends(get_db)):
+async def review_lookedup_images(request: Request, db: Session = Depends(get_db),auth: dict = Depends(get_secure_endpoint_dependency(admin_required=True)) ):
     """
     Retrieves all image records that have not yet been reviewed by an admin.
 
     If a record doesn't have a local_url, this endpoint generates one,
     saves it to the database, and returns the complete records.
     """
+    # print(f"CLIENT IP ADDRESS: {request.client.host}")
+    # forwarded_for = request.headers.get("x-forwarded-for")
+    # print(f"CLIENT IP FORWARDED FOR ADDRESS: {forwarded_for}")
+    
     images_to_review = db.query(ImageRecord).filter(
         ImageRecord.admin_reviewed == False,
         ImageRecord.status == 'success').all()
@@ -324,17 +480,17 @@ async def review_lookedup_images(request: Request, db: Session = Depends(get_db)
             confidence_level=f"{image.confidence_level:.2f}"
         )
         
-        if image.local_url is None and image.folder_location and image.filename:
-            # Generate the URL if local_url is missing
-            try:
-                image_local_url = request.url_for('get_image', date_folder=image.folder_location, filename=image.filename)
-                image.local_url = str(image_local_url)
-                made_changes = True
+        # if image.local_url is None and image.folder_location and image.filename:
+        #     # Generate the URL if local_url is missing
+        #     try:
+        #         image_local_url = request.url_for('get_image', date_folder=image.folder_location, filename=image.filename)
+        #         image.local_url = str(image_local_url)
+        #         made_changes = True
 
-            except Exception as e:
-                logging.error(f"Unable to locate the url for the image {image.folder_location}/{image.filename} exception: {e}")
+            # except Exception as e:
+                # logging.error(f"Unable to locate the url for the image {image.folder_location}/{image.filename} exception: {e}")
                 
-        result_image.local_url = image.local_url if image.local_url else image.url
+        # result_image.local_url = image.local_url if image.local_url else image.url
         images_to_be_reviewed.append(result_image)
         
     # If any URLs were generated, commit all changes to the database at once
@@ -352,7 +508,8 @@ async def review_lookedup_images(request: Request, db: Session = Depends(get_db)
 )
 async def set_image_as_reviewed(
     payload: ImageUrlPayload = Body(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: dict = Depends(get_secure_endpoint_dependency(admin_required=True))
 ):
     """
     Finds an image record by its URL and sets its 'admin_reviewed'
@@ -394,7 +551,8 @@ async def set_image_as_reviewed(
 async def relabel_image(
     background_tasks: BackgroundTasks, # 1. Add BackgroundTasks dependency
     payload: ImageUrlPayload = Body(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: dict = Depends(get_secure_endpoint_dependency(admin_required=True))
 ):
     """
     Finds an image, updates its label in the DB, and triggers a background
@@ -416,7 +574,7 @@ async def relabel_image(
     db.refresh(db_record) # Refresh to get the latest state
 
     # --- 2. Schedule the slow file I/O to run in the background ---
-    file_path = os.path.join(IMAGE_DIRECTORY, db_record.folder_location, db_record.filename)
+    file_path = os.path.join(IMAGE_DIRECTORY, db_record.folder_location, db_record.local_filename)
     
     # Determine the correct destination directory
     if db_record.predicted_class == "studio":
@@ -430,67 +588,9 @@ async def relabel_image(
         copy_image_for_retraining, 
         file_path, 
         destination_dir,
-        db_record.filename
+        db_record.local_filename
     )
             
     # The API returns a response immediately, while the file copies.
     return
     
-
-
-# @app.get("/lookedup-results/", tags=["Looked Up Images"])
-# async def get_lookedup_results(request: Request)->List[URLClassificationResult]:
-#     """
-#     This method returns a list of all lookedUp images stored on the backend with a url of the image along with the class and confidence level
-#     """
-#     logging.info("get/lookedup-results endpoint was accessed!")
-#     allFIles = os.listdir(IMAGE_DIRECTORY)
-#     results = []
-#     for fileName in allFIles:
-#         resource_url = request.url_for('get_image', filename=fileName)
-
-#         result = URLClassificationResult(
-#             url= str(resource_url),
-#             predicted_class=fileName.split('_')[-2],
-#             status='success',
-#             confidence_level=fileName.split('_')[-1].split('.')[0]
-#         )
-#         results.append(result)
-    
-#     return results
-
-# @app.post("/retrain/{filename}", tags=["Retrain"])
-# async def retrain_image(filename:str):
-#     """
-#     This is a method that allows you to input a filename of a image stored on the backend.
-#     If the images is found, this image will be pushed for retraining.
-#     """
-#     logging.info("post/retrain endpoint was accessed!")
-    
-#     source_path = os.path.join(IMAGE_DIRECTORY, filename)
-    
-#     if not os.path.exists(source_path):
-#         logging.error(f"Failed to find image file '{source_path}'")
-#         raise HTTPException(status_code=404, detail="Image not found.")
-    
-#     predicted_class=filename.split('_')[-2]
-    
-#     if predicted_class == "studio":
-#         os.makedirs(RETRAIN_ENVIRONMENT_DIR, exist_ok=True)
-#         destination_path = os.path.join(RETRAIN_ENVIRONMENT_DIR, filename)
-#     else:
-#         os.makedirs(RETRAIN_STUDIO_DIR, exist_ok=True)
-#         destination_path = os.path.join(RETRAIN_STUDIO_DIR, filename)
-        
-#     try:
-#         shutil.move(source_path, destination_path)
-#         logging.info(f"Successfully moved '{filename}' for retraining to '{destination_path}'")
-#     except Exception as e:
-#         logging.error(f"Failed to move file '{source_path}' to '{destination_path}': {e}")
-#         raise HTTPException(status_code=500, detail="Failed to move file for retraining.")
-    
-#     return {
-#         'status': 'success',
-#     }
-                
-# test url: https://arper-cdn.thron.com/delivery/public/thumbnail/arper/d8d37df6-e39a-4285-8fed-991fd6fb7d74/jd4oic/std/280x280/0707_Arper_CATIFA46_CRO_PO00105_RX00643_0470.jpg

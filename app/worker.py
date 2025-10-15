@@ -2,7 +2,7 @@
 This script starts a celery worker, it allows to run tasks asynchronously and allows to free up the main thred.
 The program uses redis to implement a job queue along with storing the necessary results
 """
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from celery import Celery
 
 import tensorflow as tf
@@ -22,7 +22,7 @@ import requests
 import uuid
 
 from .database import SessionLocal, ImageRecord
-from .baseModels import URLClassificationResult
+from .baseModels import URLClassificationResult, FileDownloadPredictionResult
 
 
 # ----- Load Environment Variables -----
@@ -44,6 +44,8 @@ MAX_WORKERS = int(os.getenv("MAX_WORKERS"))
 
 REDIS_BROKER = f"redis://{REDIS_HOST}:{REDIS_PORT}/{CELERY_BROKER_DB}"
 REDIS_BACKEND = f"redis://{REDIS_HOST}:{REDIS_PORT}/{CELERY_BACKEND_DB}"
+
+MODEL_VERSION = os.getenv("MODEL_VERSION")
 
 
 # ----- starting Celery task queue -----
@@ -85,8 +87,7 @@ def process_image_bytes(image_bytes: bytes) -> np.ndarray:
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     image = image.resize((IMG_WIDTH, IMG_HEIGHT))
     image_array = np.array(image)
-    return np.expand_dims(image_array, axis=0)
-
+    return np.expand_dims(image_array, axis=0)    
 
 def download_and_classify_url(url: str, save=True) -> URLClassificationResult:
     """
@@ -97,7 +98,9 @@ def download_and_classify_url(url: str, save=True) -> URLClassificationResult:
     db = SessionLocal()
     try:
         # --- 1. DB CHECK ---
+        print("DB CHECK")
         existing_record = db.query(ImageRecord).filter(ImageRecord.url == url).first()
+        print("DB CHECK done")
 
         if existing_record and existing_record.status == "success":
             print(f"CACHE HIT: Found existing successful record for {url}")
@@ -170,7 +173,7 @@ def download_and_classify_url(url: str, save=True) -> URLClassificationResult:
             with open(save_path, 'wb') as f:
                 f.write(response.content)
             
-            existing_record.filename = unique_filename
+            existing_record.local_filename = unique_filename
             existing_record.folder_location = current_day_dir
             
             print(f"IMAGE LOOKUP: {url} saved to {save_path}")
@@ -178,6 +181,8 @@ def download_and_classify_url(url: str, save=True) -> URLClassificationResult:
         existing_record.status = "success"
         existing_record.predicted_class = class_name
         existing_record.confidence_level = round(confidence*100,2)
+        existing_record.prediction_model_version = MODEL_VERSION
+        existing_record.image_type = "url"
         
         db.commit()
         
@@ -202,8 +207,52 @@ def download_and_classify_url(url: str, save=True) -> URLClassificationResult:
     finally:
         db.close()
     
+def download_and_classify_image_file(image_bytes: bytes, originalFileName: str, save = True)-> FileDownloadPredictionResult:
+    # image_bytes = await file.read()
+    
+    image_batch = process_image_bytes(image_bytes)
+    
+    model = get_model()
+    
+    prediction = model.predict(image_batch)
+    
+    score = float(prediction[0][0])
+        
+    if score >= 0.5:
+        # studio
+        class_name = CLASS_NAMES[1]
+        confidence = score
+    else:
+        # environment
+        class_name = CLASS_NAMES[0]
+        confidence = 1 - score
 
+    confidence=round(confidence*100,2)
 
+    file_extension = os.path.splitext(originalFileName)[1]
+    current_day_dir = datetime.now().strftime("%Y%m%d")
+
+    main_save_dir = os.getenv("IMAGE_DIRECTORY")
+    save_directory = f"{main_save_dir}/{current_day_dir}"
+    
+    os.makedirs(save_directory, exist_ok=True)
+
+    unique_filename = f"{uuid.uuid4()}_{class_name}_{round(confidence*100)}{file_extension}"
+    
+    save_path = os.path.join(save_directory, unique_filename)
+                    
+    try:
+        with open(save_path, 'wb') as f:
+            f.write(image_bytes)
+    except IOError as e:
+        raise IOError(f"Failed to write file to {save_path}: {e}")
+    
+    return FileDownloadPredictionResult(
+        local_file_name=unique_filename,
+        confidence_level=str(confidence),
+        predicted_class=class_name,
+        current_day_dir=current_day_dir
+    )
 # ----- loading model -----
 disable_GPU()
 model = None

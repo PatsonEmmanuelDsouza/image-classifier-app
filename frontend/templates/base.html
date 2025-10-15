@@ -35,7 +35,7 @@
     <div class="flex-grow-1">
         <nav class="navbar navbar-expand-lg bg-body-tertiary">
             <div class="container-fluid">
-              <a class="navbar-brand">Furniture-image-classifier-app</a>
+              <a class="navbar-brand">product-image-type-classifier</a>
               <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
                 <span class="navbar-toggler-icon"></span>
               </button>
@@ -53,8 +53,16 @@
                     <li class="nav-item">
                         <a class="nav-link active" aria-current="page" href="{{url_for('review_images')}}">Review Images</a>
                     </li>
-
                 </ul>
+
+                <form class="d-flex" action="{{ url_for('set_api_key') }}" method="POST">
+                    <input class="form-control me-2" 
+                           type="password" 
+                           name="api_key" 
+                           placeholder="{% if session.api_key %}API Key is Set{% else %}Enter API Key{% endif %}" 
+                           aria-label="API Key">
+                    <button class="btn btn-outline-success" type="submit">Save</button>
+                </form>
 
               </div>
             </div>
@@ -73,10 +81,10 @@
         </div>
         
     </div>
-
+    
     <footer class="bg-dark text-light text-center py-3 mt-auto">
         <p>
-            This project was developed to demonstrate Furniture Image Classifier App.
+            Furniture Image Classifier App
         </p>
     </footer>
 </body>

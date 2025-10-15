@@ -12,8 +12,21 @@ class URLClassificationResult(BaseModel):
     status: str
     predicted_class: str
     confidence_level: str
-    local_url: Optional[str] = None
+    # local_url: Optional[str] = None
+    
+class FileClassificationResult(BaseModel):
+    # image classification result of a URL
+    fileName: str
+    status: str
+    confidence_level: str
+    predicted_class: str
 
+class FileDownloadPredictionResult(BaseModel):
+    local_file_name: str
+    current_day_dir: str
+    confidence_level: str
+    predicted_class: str
+    
 class JobResultResponse(BaseModel):
     # this is the standard response for a job 
     job_id: str
